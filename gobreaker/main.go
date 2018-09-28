@@ -4,6 +4,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/sony/gobreaker"
 )
@@ -15,20 +16,48 @@ const (
 
 var breaker *gobreaker.CircuitBreaker
 
-func init() {
-	var settings gobreaker.Settings
-	settings.Name = "HTTP GET"
-	settings.ReadyToTrip = func(counts gobreaker.Counts) bool {
-		log.Println("counts.TotalFailures", counts.TotalFailures, "counts.Requests", counts.Requests)
-		failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-		return counts.Requests >= requestLimit && failureRatio >= failureRatio
+func main() {
+	settings := gobreaker.Settings{
+		Name: "HTTP GET", // ชื่อของ circuit breaker
+		//MaxRequests: 0, จำนวน request ที่ให้ผ่านได้เวลา half-open
+		//Interval: 0, // เวลาที่จะ reset count ตอนเป็น close
+		Timeout:     5 * time.Second,                // เวลาที่ open จะเปลี่ยนเป็น half-open
+		ReadyToTrip: ConsecutiveFailureReachedLimit, // สามารถ custom ได้ว่าเงื่อนไขของการ open คืออะไร (default เป็น failed ติดกันมากกว่า 5 ครั้ง)
+		//OnStateChange: func(name string, from State, to State)// ไว้ใช้อาจจะส่งเมล์หรือ alert เวลา state ถูกเปลี่ยน
 	}
 
 	breaker = gobreaker.NewCircuitBreaker(settings)
+
+	http.HandleFunc("/", logger(handle))
+	log.Println("listening on :8080")
+	http.ListenAndServe(":8080", nil)
+}
+
+func handle(w http.ResponseWriter, r *http.Request) {
+	body, err := Get("http://localhost:3000/v1/quizzes")
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(503)
+		w.Write([]byte("failed"))
+	} else {
+		log.Println("success ", string(body))
+		w.WriteHeader(200)
+		w.Write([]byte("success"))
+	}
+}
+
+func logger(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Println(r.URL.Path, r.Method)
+		fn(w, r)
+	}
+}
+
+func ConsecutiveFailureReachedLimit(counts gobreaker.Counts) bool {
+	return counts.ConsecutiveFailures > requestLimit
 }
 
 func Get(url string) ([]byte, error) {
-
 	body, err := breaker.Execute(func() (interface{}, error) {
 		return DoHTTPGet(url)
 	})
@@ -53,13 +82,4 @@ func DoHTTPGet(url string) (interface{}, error) {
 	}
 
 	return body, nil
-}
-
-func main() {
-	_, err := Get("http://www.google.com/robots.txt")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// fmt.Println(string(body))
 }
